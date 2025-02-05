@@ -14,6 +14,7 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 import statsmodels.api as sm
 import datetime
+from pmdarima import auto_arima
 
 # Set page config
 st.set_page_config(page_title="Bitcoin Price Prediction Dashboard", layout="wide")
@@ -103,8 +104,22 @@ def generate_lstm_predictions(model, scaler, X_test, horizon):
 def generate_arima_predictions(results, horizon):
     """Generate future predictions using ARIMA model."""
     try:
-        future_prices = results.forecast(steps=horizon)
-        return future_prices.values if isinstance(future_prices, pd.Series) else future_prices
+        # Get the last known prices
+        last_known = results.model.endog[-5:]  # Use last 5 observations
+        
+        # Generate predictions with confidence intervals
+        forecast = results.get_forecast(steps=horizon)
+        
+        # Get mean predictions and confidence intervals
+        mean_forecast = forecast.predicted_mean
+        
+        # Apply volatility adjustment
+        volatility = np.std(results.model.endog)
+        noise = np.random.normal(0, volatility * 0.1, len(mean_forecast))
+        adjusted_forecast = mean_forecast + noise
+        
+        return adjusted_forecast
+        
     except Exception as e:
         st.error(f"Error in ARIMA prediction: {str(e)}")
         return []
@@ -228,29 +243,54 @@ def create_predictions_chart(df, future_dates, future_prices, last_price, model_
 def add_confidence_intervals(fig, future_dates, future_prices, df):
     """Add confidence intervals to the prediction chart."""
     try:
-        std_err = np.std(df['Close'].pct_change().dropna())
-        z_score = 1.96  # 95% confidence interval
-        
-        upper_bound = future_prices + (future_prices * std_err * z_score)
-        lower_bound = future_prices - (future_prices * std_err * z_score)
-        
-        fig.add_trace(go.Scatter(
-            x=future_dates,
-            y=upper_bound,
-            fill=None,
-            mode='lines',
-            line=dict(color='rgba(255,0,0,0.1)'),
-            name='Upper Bound'
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=future_dates,
-            y=lower_bound,
-            fill='tonexty',
-            mode='lines',
-            line=dict(color='rgba(255,0,0,0.1)'),
-            name='Lower Bound'
-        ))
+        if hasattr(st.session_state, 'results') and st.session_state.model_choice == "ARIMA":
+            # Get forecast with confidence intervals
+            forecast = st.session_state.results.get_forecast(steps=len(future_dates))
+            conf_int = forecast.conf_int(alpha=0.05)
+            
+            # Add confidence intervals
+            fig.add_trace(go.Scatter(
+                x=future_dates,
+                y=conf_int.iloc[:, 0],  # Lower bound
+                fill=None,
+                mode='lines',
+                line=dict(color='rgba(255,0,0,0.1)'),
+                name='Lower Bound (95%)'
+            ))
+            
+            fig.add_trace(go.Scatter(
+                x=future_dates,
+                y=conf_int.iloc[:, 1],  # Upper bound
+                fill='tonexty',
+                mode='lines',
+                line=dict(color='rgba(255,0,0,0.1)'),
+                name='Upper Bound (95%)'
+            ))
+        else:
+            # Fallback to original implementation for other models
+            std_err = np.std(df['Close'].pct_change().dropna())
+            z_score = 1.96  # 95% confidence interval
+            
+            upper_bound = future_prices + (future_prices * std_err * z_score)
+            lower_bound = future_prices - (future_prices * std_err * z_score)
+            
+            fig.add_trace(go.Scatter(
+                x=future_dates,
+                y=upper_bound,
+                fill=None,
+                mode='lines',
+                line=dict(color='rgba(255,0,0,0.1)'),
+                name='Upper Bound'
+            ))
+            
+            fig.add_trace(go.Scatter(
+                x=future_dates,
+                y=lower_bound,
+                fill='tonexty',
+                mode='lines',
+                line=dict(color='rgba(255,0,0,0.1)'),
+                name='Lower Bound'
+            ))
     except Exception as e:
         st.error(f"Error adding confidence intervals: {str(e)}")
 
@@ -578,8 +618,18 @@ if st.button("Run Prediction"):
                     
                     progress_bar.progress(0.2)
                     
-                    # Fit ARIMA model
-                    model = sm.tsa.ARIMA(train_data, order=(1,1,1))
+                    # Determine optimal ARIMA parameters using auto_arima
+                    auto_model = auto_arima(train_data,
+                                          start_p=0, start_q=0, max_p=3, max_q=3, m=1,
+                                          start_P=0, seasonal=False, d=1, D=1,
+                                          trace=False, error_action='ignore',
+                                          suppress_warnings=True, stepwise=True)
+                    
+                    optimal_order = auto_model.order
+                    progress_bar.progress(0.4)
+                    
+                    # Fit ARIMA model with optimal parameters
+                    model = sm.tsa.ARIMA(train_data, order=optimal_order)
                     results = model.fit()
                     
                     progress_bar.progress(0.6)
@@ -588,8 +638,9 @@ if st.button("Run Prediction"):
                     predictions = results.forecast(steps=len(test_data))
                     actual = test_data
                     
-                    # Store results in session state
+                    # Store results and parameters in session state
                     st.session_state.results = results
+                    st.session_state.arima_order = optimal_order
                     
                     progress_bar.progress(1.0)
                     
@@ -598,227 +649,168 @@ if st.button("Run Prediction"):
                     st.stop()
             
             else:  # Random Forest
-                # Prepare features
-                df['Target'] = df['Close'].shift(-1)
-                features = ['Open', 'High', 'Low', 'Close', 'Volume']
-                if 'RSI' in indicators:
-                    features.append('RSI')
-                if 'MACD' in indicators:
-                    features.append('MACD')
-                
-                progress_bar.progress(0.2)
-                
-                X = df[features].iloc[:-1]
-                y = (df['Target'] > df['Close']).iloc[:-1].astype(int)
-                
-                train_size = int(len(X) * 0.8)
-                X_train, X_test = X[:train_size], X[train_size:]
-                y_train, y_test = y[:train_size], y[train_size:]
-                
-                progress_bar.progress(0.4)
-                
-                model = RandomForestClassifier(n_estimators=100, random_state=42)
-                model.fit(X_train, y_train)
-                
-                # Store model and data in session state
-                st.session_state.model = model
-                st.session_state.X_test = X_test
-                
-                progress_bar.progress(1.0)
-
-            # Set model as trained
-            st.session_state.model_trained = True
-            st.session_state.model_choice = model_choice
-            st.session_state.df = df
-            
-            # Show success message
-            st.success("✅ Model training completed successfully!")
-            
-            # Future predictions section - immediately after training
-            st.subheader("Future Price Predictions")
-            
-            try:
-                with st.spinner("Generating future predictions..."):
-                    # Define prediction horizons
-                    prediction_horizons = {
-                        "1m": 60,    # Next 60 minutes
-                        "5m": 24,    # Next 2 hours
-                        "15m": 16,   # Next 4 hours
-                        "30m": 16,   # Next 8 hours
-                        "60m": 24,   # Next 24 hours
-                        "1d": 7      # Next 7 days
-                    }
+                try:
+                    # Prepare features
+                    df['Target'] = df['Close'].shift(-1)
+                    features = ['Open', 'High', 'Low', 'Close', 'Volume']
+                    if 'RSI' in indicators:
+                        features.append('RSI')
+                    if 'MACD' in indicators:
+                        features.append('MACD')
                     
-                    horizon = prediction_horizons[interval]
-                    last_price = st.session_state.df['Close'].iloc[-1]
+                    progress_bar.progress(0.2)
                     
-                    # Generate future predictions based on model type
-                    if st.session_state.model_choice == "LSTM":
-                        future_prices = generate_lstm_predictions(
-                            st.session_state.model,
-                            st.session_state.scaler,
-                            st.session_state.X_test,
-                            horizon
-                        )
-                    elif st.session_state.model_choice == "ARIMA":
-                        future_prices = generate_arima_predictions(st.session_state.results, horizon)
-                    else:  # Random Forest
-                        future_prices = generate_rf_predictions(
-                            st.session_state.model,
-                            st.session_state.X_test,
-                            st.session_state.df,
-                            last_price,
-                            horizon
-                        )
+                    # Remove any rows with NaN values
+                    df_clean = df[features + ['Target']].dropna()
                     
-                    if len(future_prices) > 0:
-                        # Create future dates
-                        future_dates = generate_future_dates(st.session_state.df, interval, horizon)
-                        
-                        # Create and display future predictions chart first
-                        st.subheader("Future Price Prediction Chart")
-                        
-                        try:
-                            fig = go.Figure()
+                    X = df_clean[features]
+                    y = (df_clean['Target'] > df_clean['Close']).astype(int)
+                    
+                    train_size = int(len(X) * 0.8)
+                    X_train, X_test = X[:train_size], X[train_size:]
+                    y_train, y_test = y[:train_size], y[train_size:]
+                    
+                    progress_bar.progress(0.4)
+                    
+                    model = RandomForestClassifier(n_estimators=100, random_state=42)
+                    model.fit(X_train, y_train)
+                    
+                    # Make predictions for performance analysis
+                    y_pred = model.predict(X_test)
+                    y_pred_proba = model.predict_proba(X_test)
+                    
+                    # Store model, data, and predictions in session state
+                    st.session_state.model = model
+                    st.session_state.X_test = X_test
+                    st.session_state.y_test = y_test
+                    st.session_state.y_pred = y_pred
+                    st.session_state.y_pred_proba = y_pred_proba
+                    st.session_state.test_dates = df['Datetime'].iloc[train_size:train_size+len(y_test)]
+                    st.session_state.test_prices = df['Close'].iloc[train_size:train_size+len(y_test)]
+                    
+                    progress_bar.progress(1.0)
+                    
+                    # Set model as trained first
+                    st.session_state.model_trained = True
+                    st.session_state.model_choice = model_choice
+                    st.session_state.df = df
+                    
+                    # Show success message
+                    st.success("✅ Model training completed successfully!")
+                    
+                    # Generate and display future predictions first
+                    st.subheader("Future Price Predictions")
+                    
+                    try:
+                        with st.spinner("Generating future predictions..."):
+                            # Define prediction horizons
+                            prediction_horizons = {
+                                "1m": 60,    # Next 60 minutes
+                                "5m": 24,    # Next 2 hours
+                                "15m": 16,   # Next 4 hours
+                                "30m": 16,   # Next 8 hours
+                                "60m": 24,   # Next 24 hours
+                                "1d": 7      # Next 7 days
+                            }
                             
-                            # Add historical prices (last 30 points)
-                            historical_dates = st.session_state.df['Datetime'].iloc[-30:]
-                            historical_prices = st.session_state.df['Close'].iloc[-30:]
-                            fig.add_trace(go.Scatter(
-                                x=historical_dates,
-                                y=historical_prices,
-                                name='Historical Price',
-                                line=dict(color='blue', width=2)
-                            ))
+                            horizon = prediction_horizons[interval]
+                            last_price = st.session_state.df['Close'].iloc[-1]
                             
-                            # Add predicted prices
-                            fig.add_trace(go.Scatter(
-                                x=future_dates,
-                                y=future_prices,
-                                name='Predicted Price',
-                                line=dict(color='red', width=2, dash='dash')
-                            ))
-                            
-                            # Add confidence intervals for ARIMA
-                            if st.session_state.model_choice == "ARIMA":
-                                add_confidence_intervals(fig, future_dates, future_prices, st.session_state.df)
-                            
-                            # Update layout
-                            fig.update_layout(
-                                title=f"Bitcoin Price Prediction (Next {horizon} {interval} intervals)",
-                                xaxis_title="Date",
-                                yaxis_title="Price (USD)",
-                                template="plotly_dark",
-                                height=500,
-                                showlegend=True,
-                                hovermode='x unified',
-                                xaxis=dict(rangeslider=dict(visible=True), type="date")
+                            # Generate future predictions
+                            future_prices = generate_rf_predictions(
+                                st.session_state.model,
+                                st.session_state.X_test,
+                                st.session_state.df,
+                                last_price,
+                                horizon
                             )
                             
-                            # Show the chart
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Create and display predictions table after the chart
-                            st.subheader("Predicted Price Table")
-                            future_df_raw, future_df_formatted = create_predictions_table(future_dates, future_prices, last_price)
-                            st.table(future_df_formatted)
-                            
-                            st.success("✅ Future predictions generated successfully!")
-                            
-                        except Exception as e:
-                            st.error(f"Error creating future predictions chart: {str(e)}")
-                    else:
-                        st.warning("No future predictions were generated. Please try training the model again.")
-                    
-            except Exception as e:
-                st.error(f"Error generating future predictions: {str(e)}")
-                st.warning("Please ensure the model has been trained successfully before generating predictions.")
-            
-            # Model Performance Visualization - moved to bottom
-            st.markdown("---")  # Add a separator
-            st.subheader("Model Performance Analysis")
-            
-            try:
-                with st.spinner("Generating performance visualization..."):
-                    # Create performance visualization
-                    fig = go.Figure()
-                    
-                    if model_choice != "Random Forest":
-                        # For LSTM and ARIMA: Show error analysis over time
-                        # Ensure predictions and actual are 1-dimensional
-                        predictions_1d = predictions.ravel() if isinstance(predictions, np.ndarray) else predictions
-                        actual_1d = actual.ravel() if isinstance(actual, np.ndarray) else actual
-                        
-                        error_series = np.abs(predictions_1d - actual_1d)
-                        
-                        # Calculate rolling metrics
-                        window = min(20, len(error_series))
-                        rolling_mae = pd.Series(error_series).rolling(window=window).mean()
-                        
-                        # Plot rolling MAE
-                        fig.add_trace(go.Scatter(
-                            x=np.arange(len(rolling_mae)),  # Add x-axis values
-                            y=rolling_mae,
-                            name='Rolling Mean Error',
-                            line=dict(color='blue', width=2)
-                        ))
-                        
-                        # Update layout
-                        fig.update_layout(
-                            title=f"{model_choice} Model Error Over Time",
-                            xaxis_title="Time Steps",
-                            yaxis_title="Error (USD)",
-                            template="plotly_dark",
-                            height=400,
-                            showlegend=True,
-                            hovermode='x unified'
-                        )
-                        
-                    else:
-                        # For Random Forest: Show classification performance
-                        # Ensure predictions and actual are 1-dimensional
-                        predictions_1d = predictions.ravel() if isinstance(predictions, np.ndarray) else predictions
-                        actual_1d = actual.ravel() if isinstance(actual, np.ndarray) else actual
-                        
-                        # Calculate rolling accuracy
-                        window = min(20, len(predictions_1d))
-                        rolling_accuracy = pd.Series(actual_1d == predictions_1d).rolling(window=window, min_periods=1).mean()
-                        
-                        # Plot rolling accuracy
-                        fig.add_trace(go.Scatter(
-                            x=np.arange(len(rolling_accuracy)),  # Add x-axis values
-                            y=rolling_accuracy,
-                            name='Rolling Accuracy',
-                            line=dict(color='green', width=2)
-                        ))
-                        
-                        # Update layout
-                        fig.update_layout(
-                            title="Random Forest Model Accuracy Over Time",
-                            xaxis_title="Time Steps",
-                            yaxis_title="Accuracy",
-                            template="plotly_dark",
-                            height=400,
-                            showlegend=True,
-                            hovermode='x unified'
-                        )
-                    
-                    # Add range slider
-                    fig.update_layout(
-                        xaxis=dict(
-                            rangeslider=dict(visible=True),
-                            type="linear"
-                        )
-                    )
-                    
-                    # Show the performance chart
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    st.success("✅ Performance visualization generated successfully!")
-                    
-            except Exception as e:
-                st.error(f"Error in performance visualization: {str(e)}")
+                            if len(future_prices) > 0:
+                                # Create future dates
+                                future_dates = generate_future_dates(st.session_state.df, interval, horizon)
+                                
+                                # Create and display predictions chart
+                                fig = create_predictions_chart(
+                                    st.session_state.df,
+                                    future_dates,
+                                    future_prices,
+                                    last_price,
+                                    model_choice,
+                                    interval,
+                                    horizon
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Create and display predictions table
+                                st.subheader("Predicted Price Table")
+                                future_df_raw, future_df_formatted = create_predictions_table(future_dates, future_prices, last_price)
+                                st.table(future_df_formatted)
+                                
+                                # Add separator and model evaluation section
+                                st.markdown("---")
+                                st.markdown("## Random Forest Model Evaluation")
+                                
+                                # Display performance metrics
+                                st.markdown("### Model Performance Metrics")
+                                metrics_df = pd.DataFrame({
+                                    'Metric': ['Accuracy', 'Precision', 'Recall', 'F1 Score'],
+                                    'Value': [
+                                        accuracy_score(y_test, y_pred),
+                                        precision_recall_fscore_support(y_test, y_pred, average='binary')[0],
+                                        precision_recall_fscore_support(y_test, y_pred, average='binary')[1],
+                                        precision_recall_fscore_support(y_test, y_pred, average='binary')[2]
+                                    ]
+                                })
+                                st.table(metrics_df.set_index('Metric').style.format({'Value': '{:.2%}'}))
+                                
+                                # Create and display performance visualization
+                                st.markdown("### Model Performance Visualization")
+                                perf_fig = go.Figure()
+                                
+                                # Plot actual prices
+                                perf_fig.add_trace(go.Scatter(
+                                    x=st.session_state.test_dates,
+                                    y=st.session_state.test_prices,
+                                    name='Actual Price',
+                                    line=dict(color='blue', width=2)
+                                ))
+                                
+                                # Plot predicted probabilities
+                                perf_fig.add_trace(go.Scatter(
+                                    x=st.session_state.test_dates,
+                                    y=y_pred_proba[:, 1],
+                                    name='Probability of Increase',
+                                    yaxis='y2',
+                                    line=dict(color='red', width=2, dash='dash')
+                                ))
+                                
+                                # Update layout with secondary y-axis
+                                perf_fig.update_layout(
+                                    title='Price vs Prediction Probability',
+                                    xaxis_title='Date',
+                                    yaxis_title='Price (USD)',
+                                    yaxis2=dict(
+                                        title='Probability of Price Increase',
+                                        overlaying='y',
+                                        side='right',
+                                        range=[0, 1]
+                                    ),
+                                    template='plotly_dark',
+                                    height=500,
+                                    showlegend=True
+                                )
+                                
+                                st.plotly_chart(perf_fig, use_container_width=True)
+                            else:
+                                st.warning("No future predictions were generated. Please try training the model again.")
+                                
+                    except Exception as e:
+                        st.error(f"Error in Random Forest evaluation: {str(e)}")
                 
+                except Exception as e:
+                    st.error(f"Error in Random Forest modeling: {str(e)}")
+                    st.stop()
+
         except Exception as e:
             st.error(f"Error in model training: {str(e)}")
             st.session_state.model_trained = False
