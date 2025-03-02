@@ -59,8 +59,8 @@ model_choice = st.sidebar.selectbox(
 # Technical indicators selector
 indicators = st.sidebar.multiselect(
     "Select Technical Indicators",
-    ["SMA", "EMA", "RSI", "MACD", "Bollinger Bands"],
-    default=["SMA", "RSI"]
+    ["Moving Averages", "Bollinger Bands"],
+    default=["Moving Averages"]
 )
 
 # Helper Functions
@@ -538,29 +538,15 @@ def calculate_indicators(df):
             progress = (i + 1) / total_indicators
             progress_bar.progress(progress)
             
-            if indicator == "SMA":
-                df['SMA_7'] = df['Close'].rolling(window=7).mean()
-                df['SMA_14'] = df['Close'].rolling(window=14).mean()
-                df['SMA_30'] = df['Close'].rolling(window=30).mean()
-            
-            elif indicator == "EMA":
-                df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
-                df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
-            
-            elif indicator == "RSI":
-                delta = df['Close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                rs = gain / loss
-                df['RSI'] = 100 - (100 / (1 + rs))
-            
-            elif indicator == "MACD":
-                exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-                exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-                df['MACD'] = exp1 - exp2
-                df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+            if indicator == "Moving Averages":
+                # Calculate different moving averages
+                df['MA_5'] = df['Close'].rolling(window=5).mean()
+                df['MA_20'] = df['Close'].rolling(window=20).mean()
+                df['MA_50'] = df['Close'].rolling(window=50).mean()
+                df['MA_200'] = df['Close'].rolling(window=200).mean()
             
             elif indicator == "Bollinger Bands":
+                # Calculate Bollinger Bands (20-period MA with 2 standard deviations)
                 df['BB_middle'] = df['Close'].rolling(window=20).mean()
                 df['BB_upper'] = df['BB_middle'] + 2*df['Close'].rolling(window=20).std()
                 df['BB_lower'] = df['BB_middle'] - 2*df['Close'].rolling(window=20).std()
@@ -618,7 +604,7 @@ with col1:
         st.subheader("Bitcoin Price Chart")
         
         # Create figure with secondary y-axis
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig = make_subplots(specs=[[{"secondary_y": False}]])  # Remove secondary y-axis since we don't need it
         
         # Add candlestick
         fig.add_trace(
@@ -629,37 +615,75 @@ with col1:
                 low=df['Low'],
                 close=df['Close'],
                 name="OHLC"
-            ),
-            secondary_y=False,
+            )
         )
         
         # Add indicators with progress updates
         for indicator in indicators:
-            if indicator == "SMA":
+            if indicator == "Moving Averages":
+                # Add different moving averages with different colors
                 fig.add_trace(go.Scatter(
                     x=df.index if 'Datetime' not in df.columns else df['Datetime'],
-                    y=df['SMA_7'],
-                    name="SMA 7",
-                    line=dict(width=1)
-                ), secondary_y=False)
+                    y=df['MA_5'],
+                    name="MA 5",
+                    line=dict(color='blue', width=1)
+                ))
                 fig.add_trace(go.Scatter(
                     x=df.index if 'Datetime' not in df.columns else df['Datetime'],
-                    y=df['SMA_30'],
-                    name="SMA 30",
-                    line=dict(width=1)
-                ), secondary_y=False)
+                    y=df['MA_20'],
+                    name="MA 20",
+                    line=dict(color='orange', width=1)
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df.index if 'Datetime' not in df.columns else df['Datetime'],
+                    y=df['MA_50'],
+                    name="MA 50",
+                    line=dict(color='green', width=1)
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df.index if 'Datetime' not in df.columns else df['Datetime'],
+                    y=df['MA_200'],
+                    name="MA 200",
+                    line=dict(color='red', width=1)
+                ))
+            
+            elif indicator == "Bollinger Bands":
+                # Add Bollinger Bands
+                fig.add_trace(go.Scatter(
+                    x=df.index if 'Datetime' not in df.columns else df['Datetime'],
+                    y=df['BB_upper'],
+                    name="BB Upper",
+                    line=dict(color='gray', width=1, dash='dash')
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df.index if 'Datetime' not in df.columns else df['Datetime'],
+                    y=df['BB_middle'],
+                    name="BB Middle",
+                    line=dict(color='gray', width=1)
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df.index if 'Datetime' not in df.columns else df['Datetime'],
+                    y=df['BB_lower'],
+                    name="BB Lower",
+                    line=dict(color='gray', width=1, dash='dash'),
+                    fill='tonexty'  # Fill area between upper and lower bands
+                ))
         
         # Update layout
         fig.update_layout(
             title_text="Bitcoin Price with Technical Indicators",
             xaxis_title="Date",
+            yaxis_title="Price (USD)",
             template="plotly_dark",
             height=600,
-            showlegend=True
+            showlegend=True,
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            )
         )
-        
-        fig.update_yaxes(title_text="Price (USD)", secondary_y=False)
-        fig.update_yaxes(title_text="RSI", secondary_y=True)
         
         st.plotly_chart(fig, use_container_width=True)
         st.success("✅ Chart generated successfully!")
@@ -670,7 +694,7 @@ with col2:
         
         # Display basic statistics
         stats = pd.DataFrame({
-            'Metric': ['Current Price', 'Daily High', 'Daily Low', 'Volume'],
+            'Metric': ['Current Price', 'Daily High', 'Daily Low', 'Trading Volume'],
             'Value': [
                 f"${df['Close'].iloc[-1]:,.2f}",
                 f"${df['High'].iloc[-1]:,.2f}",
@@ -678,18 +702,19 @@ with col2:
                 f"{df['Volume'].iloc[-1]:,.0f}"
             ]
         })
-        st.table(stats)
+        st.table(stats.set_index('Metric'))
         st.success("✅ Statistics calculated successfully!")
 
 # Add Historical Data section here
 st.markdown("---")  # Add a separator
 st.subheader("Historical Data")
-st.dataframe(df.style.format({
+# Select and display only specified columns
+historical_data = df[['Datetime', 'Open', 'High', 'Low', 'Close']]
+st.dataframe(historical_data.style.format({
     'Open': '${:,.2f}',
     'High': '${:,.2f}',
     'Low': '${:,.2f}',
-    'Close': '${:,.2f}',
-    'Volume': '{:,.0f}'
+    'Close': '${:,.2f}'
 }))
 
 # Initialize session state if not exists
@@ -770,11 +795,11 @@ if st.button("Run Prediction"):
                     # Display metrics in columns
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("Mean Squared Error", f"{mse:.2f}")
+                        st.metric("Mean Squared Error", f"{mse:,.2f}")
                     with col2:
-                        st.metric("Root Mean Squared Error", f"{rmse:.2f}")
+                        st.metric("Root Mean Squared Error", f"{rmse:,.2f}")
                     with col3:
-                        st.metric("Mean Absolute Error", f"{mae:.2f}")
+                        st.metric("Mean Absolute Error", f"{mae:,.2f}")
                     
                     # Display validation chart
                     st.plotly_chart(validation_fig, use_container_width=True)
@@ -899,11 +924,11 @@ if st.button("Run Prediction"):
                     # Display metrics in columns
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("Mean Squared Error", f"{mse:.2f}")
+                        st.metric("Mean Squared Error", f"{mse:,.2f}")
                     with col2:
-                        st.metric("Root Mean Squared Error", f"{rmse:.2f}")
+                        st.metric("Root Mean Squared Error", f"{rmse:,.2f}")
                     with col3:
-                        st.metric("Mean Absolute Error", f"{mae:.2f}")
+                        st.metric("Mean Absolute Error", f"{mae:,.2f}")
                     
                     # Display validation chart
                     st.plotly_chart(validation_fig, use_container_width=True)
