@@ -35,19 +35,19 @@ st.sidebar.header("Settings")
 
 # Interval selector with maximum duration info
 interval_info = {
-    "1m": "Last 7 days",
-    "5m": "Last 60 days",
-    "15m": "Last 60 days",
-    "30m": "Last 60 days",
-    "60m": "Last 2 years",
-    "1d": "Maximum available history"
+    "1m": "1 minute (Last 7 days)",
+    "5m": "5 minutes (Last 60 days)",
+    "15m": "15 minutes (Last 60 days)",
+    "30m": "30 minutes (Last 60 days)",
+    "60m": "1 hour (Last 2 years)",
+    "1d": "1 day (Maximum history)"
 }
 
 interval = st.sidebar.selectbox(
     "Select Time Interval",
     list(interval_info.keys()),
     index=5,
-    format_func=lambda x: f"{x} ({interval_info[x]})"
+    format_func=lambda x: interval_info[x].split(" (")[0]  # Only show the time part, not the duration
 )
 
 # Model selector
@@ -145,15 +145,35 @@ def generate_rf_predictions(model, X_test, df, last_price, horizon):
     try:
         future_prices = []
         current_price = last_price
-        last_features = X_test[-1:].copy()
+        
+        # Get the last known feature values
+        last_features = X_test.iloc[-1:].copy()
         
         for _ in range(horizon):
+            # Get probability of price increase
             prob_increase = model.predict_proba(last_features)[0][1]
+            
+            # Calculate price change based on probability and historical volatility
             volatility = df['Close'].pct_change().std()
             price_change = current_price * volatility * (2 * prob_increase - 1)
+            
+            # Update current price
             current_price = current_price + price_change
             future_prices.append(current_price)
-            last_features['Close'] = current_price
+            
+            # Update features for next prediction
+            last_features['Returns'] = price_change / current_price
+            last_features['Volatility'] = volatility
+            last_features['MA_20'] = current_price  # Simplified MA update
+            last_features['RSI'] = last_features['RSI'].iloc[0]  # Keep last RSI
+            last_features['MACD'] = last_features['MACD'].iloc[0]  # Keep last MACD
+            last_features['BB_upper'] = current_price + 2 * volatility * current_price
+            last_features['BB_middle'] = current_price
+            last_features['BB_lower'] = current_price - 2 * volatility * current_price
+            last_features['Price_Momentum'] = (current_price / last_price - 1)
+            last_features['Volume_Momentum'] = last_features['Volume_Momentum'].iloc[0]  # Keep last volume momentum
+            last_features['Hour'] = last_features['Hour'].iloc[0]  # Keep last hour
+            last_features['DayOfWeek'] = last_features['DayOfWeek'].iloc[0]  # Keep last day of week
         
         return future_prices
     except Exception as e:
@@ -247,9 +267,6 @@ def create_predictions_chart(df, future_dates, future_prices, last_price, model_
             hovermode='x unified',
             xaxis=dict(rangeslider=dict(visible=True), type="date")
         )
-        
-        # Add annotations
-        add_price_annotations(fig, future_prices, last_price)
         
         return fig
     except Exception as e:
@@ -687,7 +704,7 @@ with st.spinner('Calculating metrics...'):
     price_24h_ago = df['Close'].iloc[-2] if len(df) > 1 else current_price
     price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
     
-    # Create metrics at the top with color coding
+    # Display metrics at the top with no color coding
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric(
@@ -699,8 +716,7 @@ with st.spinner('Calculating metrics...'):
         st.metric(
             "24h Change", 
             f"{price_change_24h:+,.2f}%",
-            delta=f"{price_change_24h:+,.2f}%",
-            delta_color="inverse" if price_change_24h >= 0 else "normal"
+            delta=None
         )
     with col3:
         st.metric(
@@ -849,8 +865,8 @@ if 'model_trained' not in st.session_state:
 
 # Model training and prediction button
 if st.button("Run Prediction"):
-    with st.spinner('Training model...'):
-        try:
+    try:
+        with st.spinner('Training model...'):
             if model_choice == "LSTM":
                 # Create progress bar
                 progress_bar = st.progress(0)
@@ -868,7 +884,7 @@ if st.button("Run Prediction"):
                     LSTM(50, return_sequences=False),
                     Dropout(0.3),
                     Dense(25, activation='relu'),
-                    Dense(1, activation='linear')  # Single output for price prediction
+                    Dense(1, activation='linear')
                 ])
                 progress_bar.progress(0.4)
                 
@@ -922,17 +938,15 @@ if st.button("Run Prediction"):
                     )
                     
                     # Calculate and display metrics with color coding
-                    mse = np.mean((actual - predictions) ** 2)
+                    mse = np.mean((actual - predictions) ** 2)  # Still calculate for RMSE
                     rmse = np.sqrt(mse)
                     mae = np.mean(np.abs(actual - predictions))
                     
-                    # Display metrics in columns
-                    col1, col2, col3 = st.columns(3)
+                    # Display metrics in columns (removed MSE)
+                    col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Mean Squared Error", f"{mse:,.2f}")
-                    with col2:
                         st.metric("Root Mean Squared Error", f"{rmse:,.2f}")
-                    with col3:
+                    with col2:
                         st.metric("Mean Absolute Error", f"{mae:,.2f}")
                     
                     # Display validation chart
@@ -1047,17 +1061,15 @@ if st.button("Run Prediction"):
                     )
                     
                     # Calculate and display metrics with color coding
-                    mse = np.mean((actual - predictions) ** 2)
+                    mse = np.mean((actual - predictions) ** 2)  # Still calculate for RMSE
                     rmse = np.sqrt(mse)
                     mae = np.mean(np.abs(actual - predictions))
                     
-                    # Display metrics in columns
-                    col1, col2, col3 = st.columns(3)
+                    # Display metrics in columns (removed MSE)
+                    col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Mean Squared Error", f"{mse:,.2f}")
-                    with col2:
                         st.metric("Root Mean Squared Error", f"{rmse:,.2f}")
-                    with col3:
+                    with col2:
                         st.metric("Mean Absolute Error", f"{mae:,.2f}")
                     
                     # Display validation chart
@@ -1187,29 +1199,25 @@ if st.button("Run Prediction"):
                             st.metric(
                                 "Accuracy",
                                 f"{accuracy:.2%}",
-                                delta=f"{accuracy:.2%}",
-                                delta_color="inverse" if accuracy >= 0.5 else "normal"
+                                delta=None
                             )
                         with col2:
                             st.metric(
                                 "Precision",
                                 f"{precision:.2%}",
-                                delta=f"{precision:.2%}",
-                                delta_color="inverse" if precision >= 0.5 else "normal"
+                                delta=None
                             )
                         with col3:
                             st.metric(
                                 "Recall",
                                 f"{recall:.2%}",
-                                delta=f"{recall:.2%}",
-                                delta_color="inverse" if recall >= 0.5 else "normal"
+                                delta=None
                             )
                         with col4:
                             st.metric(
                                 "F1 Score",
                                 f"{f1:.2%}",
-                                delta=f"{f1:.2%}",
-                                delta_color="inverse" if f1 >= 0.5 else "normal"
+                                delta=None
                             )
                         
                         # Display validation chart
@@ -1273,17 +1281,12 @@ if st.button("Run Prediction"):
                     
                 except Exception as e:
                     st.error(f"Error in Random Forest modeling: {str(e)}")
-                    st.stop()
-
-                except Exception as e:
-                    st.error(f"Error in model training or prediction: {str(e)}")
                     st.session_state.model_trained = False
                     st.stop()
 
-        except Exception as e:
-            st.error(f"Error in model training or prediction: {str(e)}")
-            st.session_state.model_trained = False
-            st.stop()
-
+    except Exception as e:
+        st.error(f"Error in model training or prediction: {str(e)}")
+        st.session_state.model_trained = False
+        st.stop()
 else:
     st.info("👆 Click 'Run Prediction' above to start the model training and prediction process.")
